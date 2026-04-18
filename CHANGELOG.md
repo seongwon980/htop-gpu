@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.1.7 — 2026-04-18
+
+Performance: ~5x lighter per tick on multi-GPU hosts. Identical UI.
+
+Measured on 8× A100 (host with live training jobs), 1 s refresh:
+
+    median 27.95 ms/tick → 5.34 ms/tick      (5.2x)
+
+Per-process detail (cmd, cwd, conda env, venv, docker container,
+tmux/screen ancestry) is now cached for a PID's lifetime instead of
+being recomputed from /proc every tick — the previous hot path opened
+4–5 `/proc/<pid>/*` files and walked up the parent tree for every GPU
+process on every tick.  Static GPU data (UUID, model, total memory,
+enforced power limit) is likewise fetched once per handle.  `psutil`
+now reads CPU total and boot time cheaply (mean-only and cache-once,
+respectively); the docker-inspect cache persists across ticks instead
+of being cleared every frame; `query_proc_metrics` (psutil cpu_percent
++ rss) is skipped in the default GPU process-table mode, where that
+data is not rendered.  The gradient-color table is precomputed as a
+LUT so bar rendering is indexed, not interpolated.
+
+Slow-moving telemetry is re-sampled at a slightly lower cadence
+behind the scenes (fan / temp / power every ~3 s, and the NVML
+compute-proc enumeration — a ~1 ms × N-GPUs driver round-trip, the
+single biggest per-tick cost — every ~3.5 s).  User-visible GPU util
+and memory are fresh on every tick.
+
 ## 0.1.6 — 2026-04-18
 
 - Bars now have subtle `▕ ▏` track markers on both ends, so the

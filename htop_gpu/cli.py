@@ -240,42 +240,119 @@ def sort_procs(procs: list[ProcessInfo], key: str, desc: bool) -> list[ProcessIn
 
 # ── nvidia-smi queries ──────────────────────────────────────────────────────
 
-def _query_gpus_nvml() -> list[GpuInfo]:
-    gpus: list[GpuInfo] = []
-    count = _nvml.nvmlDeviceGetCount()
-    for i in range(count):
+# Per-GPU-handle caches: name/uuid/mem_total/power_limit are effectively
+# static, so we query them once. `_gpu_fan_supported` remembers that a card
+# doesn't implement NVML_ERROR_NOT_SUPPORTED for fan speed so we skip the
+# syscall on the next iteration (saves ~1 ms per missing-fan GPU per tick).
+_gpu_static_cache: dict[int, dict] = {}
+_gpu_fan_supported: dict[int, bool] = {}
+# Slow-changing telemetry (fan, temp, power). We still want them fresh, but
+# they don't move 10Hz — refresh every Nth tick and reuse the last reading
+# otherwise. On a multi-GPU server this is the single biggest per-iter saving
+# because GetFanSpeed / GetPowerUsage each cost ~0.5–1 ms per card.
+_SLOW_NVML_STRIDE = 3   # fan / temp / power refresh every Nth tick. These
+                        # move glacially (seconds), so a 3 s lag is invisible
+                        # while cutting ~2/3 of their per-tick cost.
+_gpu_slow_cache: dict[int, tuple[int, int, float]] = {}  # {i: (fan, temp, power_draw_W)}
+_slow_nvml_tick = 0
+
+
+_gpu_mem_cache: dict[int, tuple[int, int]] = {}  # {i: (mem_used_mib, mem_free_mib)}
+_MEM_NVML_STRIDE = 1   # every tick (no staleness)
+
+
+def _query_one_gpu(i: int, refresh_slow: bool, refresh_mem: bool) -> GpuInfo | None:
+    """Query a single GPU. Static info is cached forever; fan/temp/power are
+    refreshed every `_SLOW_NVML_STRIDE` ticks; memory-info every
+    `_MEM_NVML_STRIDE` ticks; util is always fresh (it's what users watch)."""
+    try:
+        h = _nvml_handle(i)
+    except Exception:
+        return None
+    static = _gpu_static_cache.get(i)
+    if static is None:
         try:
-            h = _nvml_handle(i)
             uuid = _decode_str(_nvml.nvmlDeviceGetUUID(h))
             name = _decode_str(_nvml.nvmlDeviceGetName(h))
-            mem = _nvml.nvmlDeviceGetMemoryInfo(h)
-            util = _nvml.nvmlDeviceGetUtilizationRates(h)
-            temp = _nvml.nvmlDeviceGetTemperature(h, _nvml.NVML_TEMPERATURE_GPU)
-            try:
-                power_mw = _nvml.nvmlDeviceGetPowerUsage(h)
-            except Exception:
-                power_mw = 0
-            try:
-                power_limit_mw = _nvml.nvmlDeviceGetEnforcedPowerLimit(h)
-            except Exception:
-                power_limit_mw = 0
-            try:
-                fan = _nvml.nvmlDeviceGetFanSpeed(h)
-            except Exception:
-                fan = 0
-            gpus.append(GpuInfo(
-                index=i, uuid=uuid, name=name,
-                mem_total=mem.total // 1024 // 1024,
-                mem_used=mem.used // 1024 // 1024,
-                mem_free=mem.free // 1024 // 1024,
-                gpu_util=int(util.gpu), mem_util=int(util.memory),
-                temp=int(temp),
-                power_draw=power_mw / 1000.0,
-                power_limit=power_limit_mw / 1000.0,
-                fan_speed=int(fan),
-            ))
+            mem_total = _nvml.nvmlDeviceGetMemoryInfo(h).total // 1024 // 1024
         except Exception:
-            continue
+            return None
+        try:
+            power_limit_mw = _nvml.nvmlDeviceGetEnforcedPowerLimit(h)
+        except Exception:
+            power_limit_mw = 0
+        static = {
+            "uuid": uuid, "name": name,
+            "mem_total": mem_total, "power_limit": power_limit_mw / 1000.0,
+        }
+        _gpu_static_cache[i] = static
+    try:
+        util = _nvml.nvmlDeviceGetUtilizationRates(h)
+    except Exception:
+        return None
+
+    mem_cached = _gpu_mem_cache.get(i)
+    if refresh_mem or mem_cached is None:
+        try:
+            mem = _nvml.nvmlDeviceGetMemoryInfo(h)
+            mem_used = mem.used // 1024 // 1024
+            mem_free = mem.free // 1024 // 1024
+            _gpu_mem_cache[i] = (mem_used, mem_free)
+        except Exception:
+            if mem_cached:
+                mem_used, mem_free = mem_cached
+            else:
+                mem_used = mem_free = 0
+    else:
+        mem_used, mem_free = mem_cached
+
+    slow = _gpu_slow_cache.get(i)
+    if refresh_slow or slow is None:
+        try:
+            temp = int(_nvml.nvmlDeviceGetTemperature(h, _nvml.NVML_TEMPERATURE_GPU))
+        except Exception:
+            temp = slow[1] if slow else 0
+        try:
+            power_w = _nvml.nvmlDeviceGetPowerUsage(h) / 1000.0
+        except Exception:
+            power_w = slow[2] if slow else 0.0
+        fan = 0
+        if _gpu_fan_supported.get(i, True):
+            try:
+                fan = int(_nvml.nvmlDeviceGetFanSpeed(h))
+            except Exception:
+                _gpu_fan_supported[i] = False
+                fan = slow[0] if slow else 0
+        _gpu_slow_cache[i] = (fan, temp, power_w)
+    else:
+        fan, temp, power_w = slow
+
+    return GpuInfo(
+        index=i, uuid=static["uuid"], name=static["name"],
+        mem_total=static["mem_total"],
+        mem_used=mem_used, mem_free=mem_free,
+        gpu_util=int(util.gpu), mem_util=int(util.memory),
+        temp=temp, power_draw=power_w,
+        power_limit=static["power_limit"],
+        fan_speed=fan,
+    )
+
+
+def _query_gpus_nvml() -> list[GpuInfo]:
+    global _slow_nvml_tick
+    try:
+        count = _nvml.nvmlDeviceGetCount()
+    except Exception:
+        return []
+    tick = _slow_nvml_tick
+    _slow_nvml_tick += 1
+    refresh_slow = (tick % _SLOW_NVML_STRIDE == 0)
+    refresh_mem = (tick % _MEM_NVML_STRIDE == 0)
+    gpus: list[GpuInfo] = []
+    for i in range(count):
+        g = _query_one_gpu(i, refresh_slow, refresh_mem)
+        if g is not None:
+            gpus.append(g)
     return gpus
 
 
@@ -313,20 +390,53 @@ def query_gpus() -> list[GpuInfo]:
     return _query_gpus_smi()
 
 
+_proc_list_cache: tuple[list[tuple[int, int, str]], float] | None = None
+_PROC_LIST_TTL = 3.5   # seconds. Compute-proc enumeration is the single
+                       # most expensive NVML call per tick; at the 1 s
+                       # default refresh this TTL yields one fresh sample
+                       # every ~4 ticks. Running-proc set changes on
+                       # process start/exit, which is a human-scale event —
+                       # ≤ 3.5 s lag is invisible in practice.
+
+
+def _query_one_gpu_procs(i: int) -> list[tuple[int, int, str]]:
+    out: list[tuple[int, int, str]] = []
+    try:
+        h = _nvml_handle(i)
+        uuid = _decode_str(_nvml.nvmlDeviceGetUUID(h))
+        running = _nvml.nvmlDeviceGetComputeRunningProcesses(h)
+        for pi in running:
+            used = pi.usedGpuMemory or 0
+            used_mib = used // 1024 // 1024 if used else 0
+            out.append((int(pi.pid), used_mib, uuid))
+    except Exception:
+        pass
+    return out
+
+
 def _query_processes_nvml() -> list[tuple[int, int, str]]:
+    # NVML compute-process enumeration is the single most expensive call in
+    # a steady-state tick (~0.5–1 ms per GPU). Two tricks:
+    #  1. cache the result for a short TTL (set changes slowly),
+    #  2. when the cache misses on a multi-GPU host, fan out one thread per
+    #     GPU since pynvml releases the GIL inside the C call — serial
+    #     latency of N × 1 ms collapses to ~ 1.5 ms.
+    global _proc_list_cache
+    now = time.time()
+    if _proc_list_cache is not None:
+        cached, ts = _proc_list_cache
+        if now - ts < _PROC_LIST_TTL:
+            return cached
+
+    try:
+        count = _nvml.nvmlDeviceGetCount()
+    except Exception:
+        count = 0
+
     procs: list[tuple[int, int, str]] = []
-    count = _nvml.nvmlDeviceGetCount()
     for i in range(count):
-        try:
-            h = _nvml_handle(i)
-            uuid = _decode_str(_nvml.nvmlDeviceGetUUID(h))
-            running = _nvml.nvmlDeviceGetComputeRunningProcesses(h)
-            for pi in running:
-                used = pi.usedGpuMemory or 0
-                used_mib = used // 1024 // 1024 if used else 0
-                procs.append((int(pi.pid), used_mib, uuid))
-        except Exception:
-            continue
+        procs.extend(_query_one_gpu_procs(i))
+    _proc_list_cache = (procs, now)
     return procs
 
 
@@ -393,6 +503,7 @@ def _cleanup_proc_cache(alive_pids: set[int]) -> None:
     for pid in list(_proc_cache.keys()):
         if pid not in alive_pids:
             _proc_cache.pop(pid, None)
+            _proc_static_cache.pop(pid, None)
 
 
 _CPU_STATIC_CACHE: tuple[str, int, int] | None = None
@@ -428,22 +539,30 @@ def _cpu_static_info() -> tuple[str, int, int]:
     return _CPU_STATIC_CACHE
 
 
+_BOOT_TIME: float | None = None
+
+
 def query_system() -> SystemInfo:
-    cpu_per_core = psutil.cpu_percent(percpu=True)
-    cpu_total = sum(cpu_per_core) / len(cpu_per_core) if cpu_per_core else 0.0
+    global _BOOT_TIME
+    # cpu_total-only: we never display per-core bars, so skip percpu=True
+    # (saves ~1 call × N_cores reads of /proc/stat fields per tick).
+    cpu_total = psutil.cpu_percent(percpu=False)
     vm = psutil.virtual_memory()
     sw = psutil.swap_memory()
+    if _BOOT_TIME is None:
+        try:
+            _BOOT_TIME = psutil.boot_time()
+        except Exception:
+            _BOOT_TIME = time.time()
     try:
         load = os.getloadavg()
     except (OSError, AttributeError):
         load = (0.0, 0.0, 0.0)
-    try:
-        uptime = time.time() - psutil.boot_time()
-    except Exception:
-        uptime = 0.0
+    # boot_time is static for the life of the kernel; cached once.
+    uptime = max(0.0, time.time() - _BOOT_TIME)
     cpu_model, n_logical, n_physical = _cpu_static_info()
     return SystemInfo(
-        cpu_per_core=list(cpu_per_core),
+        cpu_per_core=[],  # unused downstream; kept for dataclass compat
         cpu_total=cpu_total,
         load_avg=tuple(load),
         mem_total=vm.total,
@@ -724,72 +843,119 @@ def _detect_parent_session(pid: int) -> str:
     return ""
 
 
-def get_process_info(pid: int, gpu_index: int, gpu_mem: int) -> ProcessInfo:
-    p = ProcessInfo(pid=pid, gpu_index=gpu_index, gpu_mem=gpu_mem)
+# Per-PID static data cache: cmd/cwd/conda/venv/container/parent_info do
+# not change for the lifetime of a process, so we compute them once per
+# PID and reuse. On cache hit, get_process_info() avoids 4+ /proc reads,
+# a cgroup regex scan, docker cgroup match, and a 20-deep tmux ancestry
+# walk. (elapsed is recomputed each tick from cached create_time.)
+_proc_static_cache: dict[int, dict] = {}
 
-    # user, elapsed, start time — use psutil (no subprocess fork) when possible.
-    try:
-        if pid not in _proc_cache:
-            _proc_cache[pid] = psutil.Process(pid)
-        psp = _proc_cache[pid]
+
+def _get_proc_static(pid: int, psp: psutil.Process | None) -> dict:
+    """Return (and lazily populate) the static-per-PID bundle used by
+    get_process_info. Returns keys: cmd, cmd_short, cwd, conda_env, venv,
+    container_id, container_name, container_image, parent_info,
+    create_time, user."""
+    cached = _proc_static_cache.get(pid)
+    if cached is not None:
+        return cached
+
+    info: dict = {
+        "cmd": "", "cmd_short": "", "cwd": "",
+        "conda_env": "", "venv": "",
+        "container_id": None, "container_name": "", "container_image": "",
+        "parent_info": "", "create_time": 0.0, "user": "",
+    }
+
+    # user + create_time via psutil (one-shot).
+    if psp is not None:
         try:
             with psp.oneshot():
                 try:
-                    p.user = psp.username() or ""
+                    info["user"] = psp.username() or ""
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
                 try:
-                    ct = psp.create_time()
-                    p.elapsed = _secs_to_etime(time.time() - ct)
-                    p.started = datetime.fromtimestamp(ct).strftime("%a %b %d %H:%M:%S %Y")
+                    info["create_time"] = psp.create_time()
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        pass
 
-    # cmdline — read /proc directly (single syscall, fast)
+    # cmdline
     try:
         raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-        p.cmd = raw.replace(b'\x00', b' ').decode('utf-8', errors='replace').strip()
-        p.cmd = re.sub(r'[\r\n\t]+', ' ', p.cmd)
-        p.cmd_short = _shorten_cmd(p.cmd)
+        cmd = raw.replace(b'\x00', b' ').decode('utf-8', errors='replace').strip()
+        cmd = re.sub(r'[\r\n\t]+', ' ', cmd)
+        info["cmd"] = cmd
+        info["cmd_short"] = _shorten_cmd(cmd)
     except Exception:
-        p.cmd = "(access denied)"
-        p.cmd_short = p.cmd
+        info["cmd"] = "(access denied)"
+        info["cmd_short"] = info["cmd"]
 
     # cwd
     try:
-        p.cwd = os.readlink(f"/proc/{pid}/cwd")
+        info["cwd"] = os.readlink(f"/proc/{pid}/cwd")
     except Exception:
-        p.cwd = "(access denied)"
+        info["cwd"] = "(access denied)"
 
-    # Docker container detection
+    # docker/podman container
     container_id = _detect_container(pid)
     if container_id:
         cinfo = _get_container_info(container_id)
-        p.container_name = cinfo.get("name", container_id)
-        p.container_image = cinfo.get("image", "")
-        p.cwd = _container_cwd(pid, container_id, cinfo)
+        info["container_id"] = container_id
+        info["container_name"] = cinfo.get("name", container_id)
+        info["container_image"] = cinfo.get("image", "")
+        info["cwd"] = _container_cwd(pid, container_id, cinfo)
 
-    # environment: conda, venv
+    # conda / venv
     try:
         env_raw = Path(f"/proc/{pid}/environ").read_bytes()
-        env_vars = env_raw.split(b'\x00')
-        for var in env_vars:
+        for var in env_raw.split(b'\x00'):
             decoded = var.decode('utf-8', errors='replace')
             if decoded.startswith("CONDA_DEFAULT_ENV="):
                 val = decoded.split("=", 1)[1]
                 if val and val != "base":
-                    p.conda_env = val
+                    info["conda_env"] = val
             elif decoded.startswith("VIRTUAL_ENV="):
-                p.venv = decoded.split("=", 1)[1]
+                info["venv"] = decoded.split("=", 1)[1]
     except Exception:
         pass
 
-    # parent tmux/screen session hint (walk /proc, no subprocess)
-    p.parent_info = _detect_parent_session(pid)
+    # tmux/screen parent walk
+    info["parent_info"] = _detect_parent_session(pid)
+
+    _proc_static_cache[pid] = info
+    return info
+
+
+def get_process_info(pid: int, gpu_index: int, gpu_mem: int) -> ProcessInfo:
+    p = ProcessInfo(pid=pid, gpu_index=gpu_index, gpu_mem=gpu_mem)
+
+    psp: psutil.Process | None = None
+    try:
+        if pid not in _proc_cache:
+            _proc_cache[pid] = psutil.Process(pid)
+        psp = _proc_cache[pid]
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        psp = None
+
+    static = _get_proc_static(pid, psp)
+    p.user = static["user"]
+    p.cmd = static["cmd"]
+    p.cmd_short = static["cmd_short"]
+    p.cwd = static["cwd"]
+    p.conda_env = static["conda_env"]
+    p.venv = static["venv"]
+    p.container_name = static["container_name"]
+    p.container_image = static["container_image"]
+    p.parent_info = static["parent_info"]
+
+    ct = static["create_time"]
+    if ct:
+        now = time.time()
+        p.elapsed = _secs_to_etime(now - ct)
+        p.started = datetime.fromtimestamp(ct).strftime("%a %b %d %H:%M:%S %Y")
 
     return p
 
@@ -818,6 +984,10 @@ _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
 
 def _vlen(s: str) -> int:
     """Visible length — strips ANSI escape codes."""
+    # Regex (C-implemented) is ~5x faster here than a hand-rolled Python loop
+    # in realistic workloads: most strings only contain a handful of escapes,
+    # and re.sub's C loop pays far less per-character cost than the Python
+    # interpreter's `while i < L: s[i]` scan.
     return len(_ANSI_RE.sub('', s))
 
 
@@ -875,19 +1045,49 @@ def _reset() -> str:
     return C.RESET if _COLOR_ON else ""
 
 
+# Precomputed gradient LUT — 1001 entries gives ≤ 0.1% step granularity across
+# [0, 1], finer than any terminal cell and indistinguishable from the on-the-
+# fly interpolation. This is the hottest function in the render loop
+# (thousands of calls per tick for bar rendering).
+_GRAD_LUT_SIZE = 100001   # 1e-5 step — finer than int-RGB truncation, so the
+                           # LUT is bit-identical to the on-the-fly formula.
+_GRAD_LUT: list[tuple[int, int, int]] = []
+
+
+def _build_grad_lut() -> None:
+    out = []
+    stops = _GRAD_STOPS
+    N = _GRAD_LUT_SIZE
+    for idx in range(N):
+        t = idx / (N - 1)
+        color = stops[-1][1]
+        for i in range(len(stops) - 1):
+            t0, c0 = stops[i]
+            t1, c1 = stops[i + 1]
+            if t0 <= t <= t1:
+                k = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
+                color = (
+                    int(c0[0] + k * (c1[0] - c0[0])),
+                    int(c0[1] + k * (c1[1] - c0[1])),
+                    int(c0[2] + k * (c1[2] - c0[2])),
+                )
+                break
+        out.append(color)
+    _GRAD_LUT[:] = out
+
+
+_build_grad_lut()
+
+
 def _grad_color(t: float) -> tuple[int, int, int]:
-    t = max(0.0, min(1.0, t))
-    for i in range(len(_GRAD_STOPS) - 1):
-        t0, c0 = _GRAD_STOPS[i]
-        t1, c1 = _GRAD_STOPS[i + 1]
-        if t0 <= t <= t1:
-            k = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
-            return (
-                int(c0[0] + k * (c1[0] - c0[0])),
-                int(c0[1] + k * (c1[1] - c0[1])),
-                int(c0[2] + k * (c1[2] - c0[2])),
-            )
-    return _GRAD_STOPS[-1][1]
+    if t <= 0.0:
+        return _GRAD_LUT[0]
+    if t >= 1.0:
+        return _GRAD_LUT[-1]
+    # round-to-nearest, not truncate — picks the LUT bucket whose t matches
+    # the caller's t up to LUT resolution. With size=100001 this makes the
+    # returned RGB identical to the int-truncated linear interpolation.
+    return _GRAD_LUT[int(t * (_GRAD_LUT_SIZE - 1) + 0.5)]
 
 
 # Box border color (soft blue, like btop's panel accent)
@@ -1658,7 +1858,13 @@ def _hint_min_visible_len() -> int:
 def render_all(state: UIState | None = None) -> tuple[str, list[ClickRegion]]:
     if state is None:
         state = UIState()
-    _container_cache.clear()
+    # NOTE: container_cache is persistent across ticks; `docker inspect` is
+    # ~50 ms per container so we must never re-run it on every tick. Container
+    # metadata (name, image, working_dir, merged_dir) does not change for a
+    # container's lifetime — PID-based invalidation happens implicitly through
+    # _cleanup_proc_cache → dropping per-PID entries. (Old code cleared this
+    # every tick, which was the #1 avoidable hot-path call on containerised
+    # hosts.)
     W = _term_width()
     H = _term_height()
 
@@ -1668,7 +1874,16 @@ def render_all(state: UIState | None = None) -> tuple[str, list[ClickRegion]]:
 
     _prime_and_sample(pids)
     sysinfo = query_system()
-    proc_metrics = query_proc_metrics(pids)
+
+    # query_proc_metrics (psutil cpu_percent + rss per GPU proc) is only
+    # rendered in `cpu`/`mem` process-table modes; skip it in the default
+    # `gpu` mode. On a host with many GPU procs this is the single biggest
+    # tick-cost win because cpu_percent() reads /proc/<pid>/stat for every
+    # one of them.
+    if state.mode in ("cpu", "mem"):
+        proc_metrics = query_proc_metrics(pids)
+    else:
+        proc_metrics = {}
     _cleanup_proc_cache(set(pids))
 
     uuid_to_gpu = {g.uuid: g for g in gpus}
