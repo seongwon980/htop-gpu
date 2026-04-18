@@ -24,6 +24,12 @@ on:
 permissions:
   contents: read
 
+# Force every JavaScript-based action (checkout, setup-python, upload/
+# download-artifact, …) onto Node 24, even when the action's metadata
+# still requests Node 20. Silences the runner deprecation warnings.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   build:
     name: Build sdist + wheel

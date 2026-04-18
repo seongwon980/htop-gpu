@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3 — 2026-04-18
+
+CI: force `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` so the few actions
+still pinned to Node 20 (upload-artifact, download-artifact) silently
+run under Node 24. No user-visible changes.
+
 ## 0.1.2 — 2026-04-18
 
 CI: bump action versions to ones running on Node 24 (silences the
