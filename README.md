@@ -68,14 +68,6 @@ For scripts:
 htop-gpu --json | jq '.processes[] | select(.gpu_mem_mib > 10000)'
 ```
 
-## Why
-
-I needed to know *which conda env* or *which docker container* a stray
-python process on GPU 5 belonged to. None of the other GPU monitors I
-tried (nvtop, gpustat, nvitop) showed that, so this exists. The
-mouse-driven mode switching and process-kill shortcut grew out of using
-it daily.
-
 ## Credits
 
 UI takes inspiration from [htop](https://htop.dev),
