@@ -5,18 +5,19 @@ Output docs/demo.gif
 
 Set Shell         bash
 Set FontSize      16
-Set Width         1500
-Set Height        520
-Set Padding       8
+Set Width         1200
+Set Height        710
+Set Padding       6
 Set Margin        0
 Set Theme         "Catppuccin Mocha"
 Set Framerate     20
 Set TypingSpeed   30ms
 
-# Launch the dashboard but hide the typing — viewer only sees the
-# rendered UI, not how it was started.
+# Launch the dashboard in long mode (full command lines + meta on its
+# own row) so the layout is taller and more square — better fit for a
+# README image than a wide letterbox.
 Hide
-Type "htop-gpu --demo -w"
+Type "htop-gpu --demo -wl"
 Enter
 Sleep 1.5s
 Show
@@ -25,6 +26,5 @@ Show
 # each refresh thanks to the demo source's gentle wobble.
 Sleep 8s
 
-# Quit (also hidden so the GIF ends on the dashboard).
 Hide
 Type "q"

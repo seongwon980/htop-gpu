@@ -1070,7 +1070,10 @@ def _gpu_content_parts(gpu: GpuInfo) -> tuple[str, str, str, str, str, str, str]
     util_sfx = f"  {gpu.gpu_util:>3}%"                # always 6 chars
     vram_pfx = "VRAM: "
     vram_sfx = f"  {vram_text}"                       # always 15 chars
-    power_s = f"Power: {gpu.power_draw:>3.0f}/{gpu.power_limit:>3.0f}W"  # 15 chars
+    # 4-digit width handles 4-digit watts (B200 / H200 cards push past
+    # 1000 W); without this the Power column shifts when a card spikes
+    # above 999 W and the in-row separators stop aligning across rows.
+    power_s = f"Power: {gpu.power_draw:>4.0f}/{gpu.power_limit:>4.0f}W"
     temp_s = f"Temp: {gpu.temp:>3d}°C"                # 11 chars
     fan_s = f"Fan: {gpu.fan_speed:>3d}%" if gpu.fan_speed else ""
     return util_pfx, util_sfx, vram_pfx, vram_sfx, power_s, temp_s, fan_s
