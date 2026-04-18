@@ -1109,8 +1109,9 @@ def render_gpus_box(gpus: list[GpuInfo], W: int,
     # otherwise just "N GPUs".
     names = {g.name for g in gpus}
     if len(names) == 1:
-        short = next(iter(names)).replace("NVIDIA ", "").replace("GeForce ", "")
-        subtitle = f"{len(gpus)} × {short}"
+        # The full nvidia-smi name (e.g. "NVIDIA B200") fits comfortably in
+        # the title row; no need to strip the vendor prefix.
+        subtitle = f"{len(gpus)} × {next(iter(names))}"
     else:
         subtitle = f"{len(gpus)} GPUs"
     lines.append(_box_top("gpus", W, subtitle, clickable=True))
@@ -2068,7 +2069,32 @@ def main():
                         help="refresh interval in seconds (default: 1.0)")
     parser.add_argument("--json", action="store_true",
                         help="output as JSON")
+    parser.add_argument("--demo", action="store_true",
+                        help=argparse.SUPPRESS)  # internal: render fake data
     args = parser.parse_args()
+
+    if args.demo:
+        # `dev/demo.py` is a local-only file (gitignored, not shipped to
+        # PyPI) used for recording the README GIF. Loaded via importlib so
+        # we don't ship it inside the package.
+        import importlib.util
+        import pathlib
+        candidates = [
+            pathlib.Path(__file__).resolve().parent.parent / "dev" / "demo.py",
+            pathlib.Path.cwd() / "dev" / "demo.py",
+        ]
+        spec = None
+        for p in candidates:
+            if p.is_file():
+                spec = importlib.util.spec_from_file_location("_htop_gpu_demo", p)
+                break
+        if spec is None:
+            print("--demo requires dev/demo.py (dev-only, not shipped)",
+                  file=sys.stderr)
+            sys.exit(1)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        m.install()
 
     if args.json:
         import json

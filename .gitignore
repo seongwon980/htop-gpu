@@ -42,3 +42,7 @@ gpu_who/
 
 # Local tooling caches
 .claude/
+
+# Local dev tooling (sample-data demo source for recording the README GIF).
+# Not shipped to PyPI or pushed to the public repo.
+dev/
