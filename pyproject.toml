@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "htop-gpu"
-version = "0.1.7"
+version = "0.1.8"
 description = "Terminal dashboard for NVIDIA GPUs, system CPU/memory, and processes — clickable, with conda/docker/tmux info per process."
 readme = "README.md"
 license = "MIT"
@@ -52,6 +52,7 @@ dependencies = [
 
 [project.scripts]
 htop-gpu = "htop_gpu.cli:main"
+hgpu     = "htop_gpu.cli:main"
 
 [project.urls]
 Homepage      = "https://github.com/seongwon980/htop-gpu"

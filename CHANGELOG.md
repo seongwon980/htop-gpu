@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.8 — 2026-04-18
+
+Fix: restore the `hgpu` short-alias command. 0.1.7 unintentionally
+dropped it while debugging a stale `~/.local/bin/hgpu` on another
+machine; it was always meant to ship alongside `htop-gpu`.
+
 ## 0.1.7 — 2026-04-18
 
 Performance: ~5x lighter per tick on multi-GPU hosts. Identical UI.
