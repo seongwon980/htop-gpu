@@ -937,27 +937,46 @@ def _btn(label: str, key: str | None = None) -> str:
     return f" ▶ {label} "
 
 
+_TRACK_RAW = "\033[38;2;150;150;170m"  # bright enough to frame the bar track
+
+
 def bar(pct: float, width: int = 30) -> str:
-    """btop-style gradient bar using slim ■ chars for filled cells and
-    dim · for empty — looks lighter than solid █ blocks."""
+    """btop-style gradient bar wrapped in ▕ ▏ track markers. The
+    markers are always visible (even at 100% fill), so the right-hand
+    limit of the bar reads at a glance. Body cells use slim ■ for
+    filled and dim · for empty."""
     if not _COLOR_ON:
         filled = max(0, min(width, int(pct / 100 * width)))
         return "#" * filled + "-" * (width - filled)
 
-    frac = max(0.0, min(1.0, pct / 100.0))
-    full = round(frac * width)
-    full = max(0, min(width, full))
+    if width < 4:
+        # Too narrow for brackets — plain rendering.
+        frac = max(0.0, min(1.0, pct / 100.0))
+        full = max(0, min(width, round(frac * width)))
+        parts = []
+        denom = max(1, width - 1)
+        for i in range(full):
+            r, g, b = _grad_color(i / denom)
+            parts.append(f"{_rgb(r, g, b)}■")
+        if width - full > 0:
+            parts.append(_EMPTY_RAW + "·" * (width - full))
+        parts.append(C.RESET)
+        return "".join(parts)
 
-    parts: list[str] = []
-    denom = max(1, width - 1)
+    inner_w = width - 2
+    frac = max(0.0, min(1.0, pct / 100.0))
+    full = max(0, min(inner_w, round(frac * inner_w)))
+
+    parts: list[str] = [f"{_TRACK_RAW}▕"]
+    denom = max(1, inner_w - 1)
     for i in range(full):
         r, g, b = _grad_color(i / denom)
         parts.append(f"{_rgb(r, g, b)}■")
 
-    empty = width - full
+    empty = inner_w - full
     if empty > 0:
         parts.append(_EMPTY_RAW + "·" * empty)
-    parts.append(C.RESET)
+    parts.append(f"{_TRACK_RAW}▏{C.RESET}")
     return "".join(parts)
 
 
@@ -1050,7 +1069,7 @@ def render_cpu_box(sysinfo: SystemInfo, W: int) -> list[str]:
         pct_s = f"{_rgb(r, g, b)}{pct_plain}{C.RESET}"
     else:
         pct_s = pct_plain
-    lines.append(_box_line(f"{bar(sysinfo.cpu_total, bar_w)}  {pct_s}", W))
+    lines.append(_box_line(f"{bar(sysinfo.cpu_total, bar_w)} {pct_s}", W))
     lines.append(_box_bottom(W))
     return lines
 
@@ -1084,9 +1103,9 @@ def render_mem_box(sysinfo: SystemInfo, W: int) -> list[str]:
     lines.append(_box_top("memory", W, subtitle, clickable=True, subtitle_dim=False))
     inner_w = W - 4
 
-    # Fixed budget: label(4) + "  " + "  " + mem_txt(16) + "  " + pct(4) = 30
+    # Fixed budget: label(4) + "  " + " " + mem_txt(16) + "  " + pct(4)
     MEM_TXT_W = 16
-    fixed = 4 + 2 + 2 + MEM_TXT_W + 2 + 4
+    fixed = 4 + 2 + 1 + MEM_TXT_W + 2 + 4
     bar_w = max(6, inner_w - fixed)
 
     def _row(label: str, pct: float, used: int, total: int) -> str:
@@ -1094,7 +1113,7 @@ def render_mem_box(sysinfo: SystemInfo, W: int) -> list[str]:
         total_s = f"{total / 1024 ** 3:.1f}G"
         mem_txt = f"{used_s} / {total_s}".rjust(MEM_TXT_W)
         return (
-            f"{cb(label.ljust(4))}  {bar(pct, bar_w)}  "
+            f"{cb(label.ljust(4))}  {bar(pct, bar_w)} "
             f"{mem_txt}  {c(C.DIM, f'{pct:>3.0f}%')}"
         )
 
@@ -1293,8 +1312,8 @@ def render_gpus_box(gpus: list[GpuInfo], W: int,
         util_num = util_sfx[2:]     # "NNN%"  (strip leading 2-space pad)
         vram_val = vram_sfx[2:]     # "used/total"
 
-        util_part = f"{cb('Util:')} {bar(gpu.gpu_util, bar_w)}  {util_col}{util_num}{reset}"
-        vram_part = f"{cb('VRAM:')} {bar(mem_pct, bar_w)}  {vram_col}{vram_val}{reset}"
+        util_part = f"{cb('Util:')} {bar(gpu.gpu_util, bar_w)} {util_col}{util_num}{reset}"
+        vram_part = f"{cb('VRAM:')} {bar(mem_pct, bar_w)} {vram_col}{vram_val}{reset}"
         parts = [util_part, vram_part]
         if include_power:
             parts.append(f"{cb('Power:')} {power_col}{power_s[len('Power: '):]}{reset}")

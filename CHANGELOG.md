@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.6 — 2026-04-18
+
+- Bars now have subtle `▕ ▏` track markers on both ends, so the
+  right-hand limit of the bar reads at a glance even at 100% fill.
+- Tighter spacing between bars and their value/percent labels.
+
 ## 0.1.5 — 2026-04-18
 
 - GPU row label is now colored by activity: green when no process is
