@@ -156,6 +156,9 @@ class SystemInfo:
     swap_used: int = 0
     swap_percent: float = 0.0
     uptime_seconds: float = 0.0
+    cpu_model: str = ""
+    cpu_count_logical: int = 0
+    cpu_count_physical: int = 0
 
 
 # ── UI state + click regions (htop-style interactive watch mode) ─────────────
@@ -392,6 +395,39 @@ def _cleanup_proc_cache(alive_pids: set[int]) -> None:
             _proc_cache.pop(pid, None)
 
 
+_CPU_STATIC_CACHE: tuple[str, int, int] | None = None
+
+
+def _cpu_static_info() -> tuple[str, int, int]:
+    """(model_name, logical_count, physical_count) — cached; values are stable
+    for the lifetime of the process."""
+    global _CPU_STATIC_CACHE
+    if _CPU_STATIC_CACHE is not None:
+        return _CPU_STATIC_CACHE
+    model = ""
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.startswith("model name"):
+                    model = line.split(":", 1)[1].strip()
+                    break
+    except OSError:
+        pass
+    # Collapse common noisy substrings ("(R)", "(TM)", "CPU @ ...GHz").
+    if model:
+        import re as _re
+        model = _re.sub(r"\(R\)|\(TM\)|\(tm\)|\(r\)|CPU", "", model)
+        model = _re.sub(r"\s+@\s*[\d.]+\s*GHz", "", model)
+        model = " ".join(model.split())
+    try:
+        logical = psutil.cpu_count(logical=True) or 0
+        physical = psutil.cpu_count(logical=False) or 0
+    except Exception:
+        logical = physical = 0
+    _CPU_STATIC_CACHE = (model, logical, physical)
+    return _CPU_STATIC_CACHE
+
+
 def query_system() -> SystemInfo:
     cpu_per_core = psutil.cpu_percent(percpu=True)
     cpu_total = sum(cpu_per_core) / len(cpu_per_core) if cpu_per_core else 0.0
@@ -405,6 +441,7 @@ def query_system() -> SystemInfo:
         uptime = time.time() - psutil.boot_time()
     except Exception:
         uptime = 0.0
+    cpu_model, n_logical, n_physical = _cpu_static_info()
     return SystemInfo(
         cpu_per_core=list(cpu_per_core),
         cpu_total=cpu_total,
@@ -417,6 +454,9 @@ def query_system() -> SystemInfo:
         swap_used=sw.used,
         swap_percent=sw.percent,
         uptime_seconds=uptime,
+        cpu_model=cpu_model,
+        cpu_count_logical=n_logical,
+        cpu_count_physical=n_physical,
     )
 
 
@@ -932,14 +972,25 @@ _TITLE_KEYS = {
 
 
 def _box_top(title: str, width: int, subtitle: str = "",
-             clickable: bool = False) -> str:
+             clickable: bool = False, subtitle_dim: bool = True) -> str:
     """╭──┤ [title] ├────────── subtitle ──╮
     When clickable=True the title is rendered as a button (highlighted
-    background) so users see it as a click target."""
+    background) so users see it as a click target. subtitle_dim=False
+    renders the subtitle in normal (non-dim) color — used for boxes whose
+    subtitle carries info we want visible at a glance (e.g. GPU model)."""
     title_rendered = _btn(title, key=_TITLE_KEYS.get(title)) if clickable else f" {cb(title)} "
     prefix = f"{_border('╭──┤')}{title_rendered}{_border('├')}"
     if subtitle:
-        suffix = f"{_border('┤')} {c(C.DIM, subtitle)} {_border('├──╮')}"
+        # Truncate subtitle so it never pushes the right border off the line.
+        # Budget: width - prefix - borders("┤  ├──╮" = 7 visible) = max subtitle width.
+        budget = width - _vlen(prefix) - 7
+        if budget < 1:
+            suffix = _border("──╮")
+        else:
+            vis_sub = subtitle if _vlen(subtitle) <= budget \
+                else _ansi_truncate(subtitle, budget)
+            styled = c(C.DIM, vis_sub) if subtitle_dim else vis_sub
+            suffix = f"{_border('┤')} {styled} {_border('├──╮')}"
     else:
         suffix = _border("──╮")
     fill = width - _vlen(prefix) - _vlen(suffix)
@@ -963,11 +1014,33 @@ def _box_line(content: str, width: int) -> str:
 
 # ── Boxed section renderers ──────────────────────────────────────────────────
 
+def _cpu_subtitle(sysinfo: SystemInfo, budget: int) -> str:
+    """Build CPU box subtitle, shrinking gracefully to fit `budget` visible
+    columns. Richest form: '12% · 24 cores · AMD EPYC 7763'."""
+    pct = f"{sysinfo.cpu_total:.0f}%"
+    nL = sysinfo.cpu_count_logical
+    model = sysinfo.cpu_model
+    candidates = []
+    if nL and model:
+        candidates.append(f"{pct} · {nL} cores · {model}")
+    if nL:
+        candidates.append(f"{pct} · {nL} cores")
+    candidates.append(pct)
+    for s in candidates:
+        if len(s) <= budget:
+            return s
+    return pct
+
+
 def render_cpu_box(sysinfo: SystemInfo, W: int) -> list[str]:
     """CPU box: single usage bar + percent. 4 lines (one blank row to
     keep the height matched with the memory box for hstack alignment)."""
     lines: list[str] = []
-    lines.append(_box_top("cpu", W, f"{sysinfo.cpu_total:.0f}%", clickable=True))
+    # Budget roughly matches _box_top's subtitle budget (prefix + borders = ~20
+    # for "cpu" clickable). Use a conservative value so we don't get truncated.
+    sub_budget = max(4, W - 20)
+    subtitle = _cpu_subtitle(sysinfo, sub_budget)
+    lines.append(_box_top("cpu", W, subtitle, clickable=True, subtitle_dim=False))
     inner_w = W - 4
 
     bar_w = max(8, inner_w - 8)
@@ -982,14 +1055,33 @@ def render_cpu_box(sysinfo: SystemInfo, W: int) -> list[str]:
     return lines
 
 
+def _mem_subtitle(sysinfo: SystemInfo, budget: int) -> str:
+    """Memory box subtitle with swap usage. Richest form:
+    '35% · swap 2.3G / 8.0G (66%)'. Shrinks to just memory % when tight."""
+    mem_pct = f"{sysinfo.mem_percent:.0f}%"
+    if sysinfo.swap_total <= 0:
+        return mem_pct
+    sp = sysinfo.swap_percent
+    su_g = sysinfo.swap_used / 1024 ** 3
+    st_g = sysinfo.swap_total / 1024 ** 3
+    candidates = [
+        f"{mem_pct} · swap {su_g:.1f}G / {st_g:.1f}G ({sp:.0f}%)",
+        f"{mem_pct} · swap {su_g:.1f}G / {st_g:.1f}G",
+        f"{mem_pct} · swap {sp:.0f}%",
+        mem_pct,
+    ]
+    for s in candidates:
+        if len(s) <= budget:
+            return s
+    return mem_pct
+
+
 def render_mem_box(sysinfo: SystemInfo, W: int) -> list[str]:
     """Memory box: single Mem usage row. 3 lines — Swap moves to the subtitle."""
     lines: list[str] = []
-    if sysinfo.swap_total > 0:
-        subtitle = f"{sysinfo.mem_percent:.0f}%  ·  swap {sysinfo.swap_percent:.0f}%"
-    else:
-        subtitle = f"{sysinfo.mem_percent:.0f}%"
-    lines.append(_box_top("memory", W, subtitle, clickable=True))
+    sub_budget = max(4, W - 23)   # matches _box_top budget for "memory" title
+    subtitle = _mem_subtitle(sysinfo, sub_budget)
+    lines.append(_box_top("memory", W, subtitle, clickable=True, subtitle_dim=False))
     inner_w = W - 4
 
     # Fixed budget: label(4) + "  " + "  " + mem_txt(16) + "  " + pct(4) = 30
@@ -1064,16 +1156,17 @@ def _gpu_content_parts(gpu: GpuInfo) -> tuple[str, str, str, str, str, str, str]
     as plain-text strings (no ANSI). All fields use fixed-width formatting so
     every GPU row renders to the same visible length — the right edge of each
     box lines up regardless of whether numbers are 1, 2, or 3 digits."""
-    # VRAM: right-pad used to 6, left-pad total to 6 → always 13 chars ("used/total")
-    vram_text = f"{_fmt_mib(gpu.mem_used):>6}/{_fmt_mib(gpu.mem_total):<6}"
+    # VRAM: "used / total" with a space on each side of the slash.
+    # Right-pad used / left-pad total to 6 chars each → always 15 visible chars.
+    vram_text = f"{_fmt_mib(gpu.mem_used):>6} / {_fmt_mib(gpu.mem_total):<6}"
     util_pfx = "Util: "
     util_sfx = f"  {gpu.gpu_util:>3}%"                # always 6 chars
     vram_pfx = "VRAM: "
-    vram_sfx = f"  {vram_text}"                       # always 15 chars
+    vram_sfx = f"  {vram_text}"                       # always 17 chars
     # 4-digit width handles 4-digit watts (B200 / H200 cards push past
     # 1000 W); without this the Power column shifts when a card spikes
     # above 999 W and the in-row separators stop aligning across rows.
-    power_s = f"Power: {gpu.power_draw:>4.0f}/{gpu.power_limit:>4.0f}W"
+    power_s = f"Power: {gpu.power_draw:>4.0f} / {gpu.power_limit:.0f}W"
     temp_s = f"Temp: {gpu.temp:>3d}°C"                # 11 chars
     fan_s = f"Fan: {gpu.fan_speed:>3d}%" if gpu.fan_speed else ""
     return util_pfx, util_sfx, vram_pfx, vram_sfx, power_s, temp_s, fan_s
@@ -1101,7 +1194,8 @@ def _unified_bar_w(gpus: list[GpuInfo], inner_w: int) -> int:
 
 def render_gpus_box(gpus: list[GpuInfo], W: int,
                     state: UIState | None = None,
-                    show_separators: bool = False) -> list[str]:
+                    show_separators: bool = False,
+                    busy_gpus: set[int] | None = None) -> list[str]:
     """Combined GPU box — one row per GPU inside a single outer box.
     Saves vertical space versus one-box-per-GPU and keeps all bars aligned."""
     lines: list[str] = []
@@ -1117,7 +1211,7 @@ def render_gpus_box(gpus: list[GpuInfo], W: int,
         subtitle = f"{len(gpus)} × {next(iter(names))}"
     else:
         subtitle = f"{len(gpus)} GPUs"
-    lines.append(_box_top("gpus", W, subtitle, clickable=True))
+    lines.append(_box_top("gpus", W, subtitle, clickable=True, subtitle_dim=False))
 
     inner_w = W - 4
     # Column separator: dim vertical bar between sections, like btop's table.
@@ -1132,16 +1226,38 @@ def render_gpus_box(gpus: list[GpuInfo], W: int,
 
     # Unified bar_w across all rows so bars line up for comparison.
     # Row structure: prefix  gap  Util bar util_sfx  gap  VRAM bar vram_sfx  gap  meta_text
-    max_fixed = 0
-    for g in gpus:
-        _, util_sfx, _, vram_sfx, power_s, temp_s, fan_s = _gpu_content_parts(g)
-        meta_parts = [power_s, temp_s] + ([fan_s] if fan_s else [])
-        meta_text = gap.join(meta_parts)
-        fixed = (prefix_w + len(gap)
-                 + len("Util: ") + len(util_sfx) + len(gap)
-                 + len("VRAM: ") + len(vram_sfx) + len(gap)
-                 + len(meta_text))
-        max_fixed = max(max_fixed, fixed)
+    # Adaptive: drop Fan → Temp → Power when the row would otherwise overflow
+    # (prefer hiding a whole column over mid-column `…` truncation).
+    MIN_BAR = 6
+
+    def _max_fixed(include_power: bool, include_temp: bool, include_fan: bool) -> int:
+        m = 0
+        for g in gpus:
+            _, util_sfx, _, vram_sfx, power_s, temp_s, fan_s = _gpu_content_parts(g)
+            meta_parts = []
+            if include_power:
+                meta_parts.append(power_s)
+            if include_temp:
+                meta_parts.append(temp_s)
+            if include_fan and fan_s:
+                meta_parts.append(fan_s)
+            meta_text = gap.join(meta_parts)
+            fixed = (prefix_w + len(gap)
+                     + len("Util: ") + len(util_sfx) + len(gap)
+                     + len("VRAM: ") + len(vram_sfx))
+            if meta_text:
+                fixed += len(gap) + len(meta_text)
+            m = max(m, fixed)
+        return m
+
+    # Try full → drop fan → drop temp → drop power. Pick the first config whose
+    # bar width is readable.
+    for inc_p, inc_t, inc_f in [(True, True, True), (True, True, False),
+                                 (True, False, False), (False, False, False)]:
+        max_fixed = _max_fixed(inc_p, inc_t, inc_f)
+        if (inner_w - max_fixed) // 2 >= MIN_BAR:
+            break
+    include_power, include_temp, include_fan = inc_p, inc_t, inc_f
     bar_w = max(3, (inner_w - max_fixed) // 2)
 
     # Dotted separator line used between rows for vertical breathing room.
@@ -1159,20 +1275,32 @@ def render_gpus_box(gpus: list[GpuInfo], W: int,
         power_col = _grad_ansi(power_pct)
         fan_col = _grad_ansi(gpu.fan_speed) if gpu.fan_speed else ""
 
-        # GPU label — highlighted when this index is the active filter.
+        # GPU label colour:
+        #   * active filter → cyan (takes priority)
+        #   * GPU has running procs → red (bar's right-end colour)
+        #   * GPU is idle → green (bar's left-end colour)
         filtered = state is not None and state.filter_gpu == gpu.index
         label_text = f"GPU {gpu.index:>{idx_w}}"
-        idx_label = c(C.CYAN + C.BOLD, label_text) if filtered else cb(label_text)
+        if filtered:
+            idx_label = c(C.CYAN + C.BOLD, label_text)
+        elif _COLOR_ON:
+            has_procs = busy_gpus is not None and gpu.index in busy_gpus
+            r, g, b = _grad_color(1.0 if has_procs else 0.0)
+            idx_label = f"{_rgb(r, g, b)}{C.BOLD}{label_text}{C.RESET}"
+        else:
+            idx_label = cb(label_text)
 
         util_num = util_sfx[2:]     # "NNN%"  (strip leading 2-space pad)
         vram_val = vram_sfx[2:]     # "used/total"
 
         util_part = f"{cb('Util:')} {bar(gpu.gpu_util, bar_w)}  {util_col}{util_num}{reset}"
         vram_part = f"{cb('VRAM:')} {bar(mem_pct, bar_w)}  {vram_col}{vram_val}{reset}"
-        power_part = f"{cb('Power:')} {power_col}{power_s[len('Power: '):]}{reset}"
-        temp_part = f"{cb('Temp:')} " + c(tc + C.BOLD, temp_s[len('Temp: '):])
-        parts = [util_part, vram_part, power_part, temp_part]
-        if fan_s:
+        parts = [util_part, vram_part]
+        if include_power:
+            parts.append(f"{cb('Power:')} {power_col}{power_s[len('Power: '):]}{reset}")
+        if include_temp:
+            parts.append(f"{cb('Temp:')} " + c(tc + C.BOLD, temp_s[len('Temp: '):]))
+        if include_fan and fan_s:
             parts.append(f"{cb('Fan:')} {fan_col}{fan_s[len('Fan: '):]}{reset}")
 
         row = idx_label + gap_rendered + gap_rendered.join(parts)
@@ -1252,7 +1380,7 @@ def render_proc_box(all_procs: list[ProcessInfo], W: int,
     mode_label = ""
     if state is not None and state.mode != "gpu":
         metric = {"cpu": "by CPU", "mem": "by MEM"}.get(state.mode, state.mode)
-        mode_label = f"  ·  {metric}  ·  click to reset ◀"
+        mode_label = f" · {metric} · click to reset ◀"
     subtitle = subtitle_count + mode_label
     lines.append(_box_top("processes", W, subtitle, clickable=True))
 
@@ -1340,7 +1468,7 @@ def render_proc_box(all_procs: list[ProcessInfo], W: int,
 
         cmd_text = proc.cmd_short or ""
         # First-row cmd width (reduced if inline meta is appended on row 1).
-        sep = "  ·  "
+        sep = " · "
         if meta_inline:
             cmd_width_first = max(15, cmd_width - meta_vlen - len(sep))
         else:
@@ -1638,8 +1766,10 @@ def render_all(state: UIState | None = None) -> tuple[str, list[ClickRegion]]:
     # GPUs — combined box, clickable to reset mode (skip when focused on procs)
     if gpus and not state.focus_procs:
         gpus_start = len(lines) + 1
+        busy_gpus = {idx for idx in procs_by_gpu.keys() if idx >= 0}
         lines.extend(render_gpus_box(
-            gpus, W, state=state, show_separators=gpu_separators))
+            gpus, W, state=state, show_separators=gpu_separators,
+            busy_gpus=busy_gpus))
         gpus_end = len(lines)
         regions.append(ClickRegion(gpus_start, gpus_end, 1, W, "mode:gpu"))
 

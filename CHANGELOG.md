@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.5 — 2026-04-18
+
+- GPU row label is now colored by activity: green when no process is
+  running on that GPU, red when it's busy (matches the bar gradient's
+  endpoints).
+- CPU box subtitle now shows core count and model name
+  (e.g. `32% · 20 cores · 12th Gen Intel Core i7-12700K`), dropping the
+  model then the core count as the terminal narrows.
+- Memory box subtitle now shows swap in GB
+  (e.g. `35% · swap 3.1G / 4.7G (66%)`), also with graceful shrinking.
+- Brighter subtitle rendering on the CPU / memory / GPU boxes — the
+  dim styling made model names hard to read.
+- Cleaner separators: single space around `·`, around `/` in
+  VRAM (`5.9G / 47.8G`) and Power (`194 / 300W`).
+- GPU row now drops whole columns (Fan → Temp → Power) when the
+  terminal is narrow, instead of mid-column `Fan…` truncation.
+
 ## 0.1.4 — 2026-04-18
 
 CI: collapse build + publish into a single job — eliminates the
