@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2 — 2026-04-18
+
+CI: bump action versions to ones running on Node 24 (silences the
+runner deprecation warnings). No user-visible changes.
+
 ## 0.1.1 — 2026-04-18
 
 Fix: Power column alignment when a card draws more than 999 W (B200,
