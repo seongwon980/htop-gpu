@@ -4,9 +4,9 @@
 
 **NVIDIA GPUs, system CPU/memory, and processes in one terminal dashboard** — each process annotated with its conda env, docker container, and working directory.
 
-[![PyPI](https://img.shields.io/pypi/v/htop-gpu.svg?style=flat-square&color=blue)](https://pypi.org/project/htop-gpu/)
-[![Python](https://img.shields.io/pypi/pyversions/htop-gpu.svg?style=flat-square)](https://pypi.org/project/htop-gpu/)
-[![License](https://img.shields.io/badge/license-MIT-yellow.svg?style=flat-square)](LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/htop-gpu.svg?style=flat-square&color=blue&v=2)](https://pypi.org/project/htop-gpu/)
+[![Python](https://img.shields.io/pypi/pyversions/htop-gpu.svg?style=flat-square&v=2)](https://pypi.org/project/htop-gpu/)
+[![License](https://img.shields.io/badge/license-MIT-yellow.svg?style=flat-square&v=2)](LICENSE)
 
 [Install](#install) · [Usage](#usage) · [Keys](#keys) · [Why](#why)
 
