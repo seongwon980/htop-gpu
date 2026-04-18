@@ -1,19 +1,16 @@
 name: Publish to PyPI
 
 # Triggered by pushing a tag like v0.1.0 or v1.2.3 to GitHub.
-# Build the sdist + wheel and upload via PyPI Trusted Publishing.
+# Builds the sdist + wheel and uploads via PyPI Trusted Publishing.
 #
 # Setup checklist (one-time, on PyPI):
-#   1. Create the project on PyPI (you already did when you uploaded 0.1.0
-#      manually with `twine upload`). For brand-new projects, see the
-#      "pending" trusted publisher flow at https://docs.pypi.org/trusted-publishers
-#   2. Go to https://pypi.org/manage/project/htop-gpu/settings/publishing/
-#   3. Add a Trusted Publisher with:
+#   1. https://pypi.org/manage/project/htop-gpu/settings/publishing/
+#   2. Add a Trusted Publisher with:
 #        Owner:        seongwon980
 #        Repository:   htop-gpu
 #        Workflow:     publish.yml
 #        Environment:  release   (matches the env: line below)
-#   4. After that, every `git tag v0.1.1 && git push --tags` will publish
+#   3. After that, every `git tag vX.Y.Z && git push --tags` publishes
 #      automatically — no PyPI token needed.
 
 on:
@@ -24,16 +21,16 @@ on:
 permissions:
   contents: read
 
-# Force every JavaScript-based action (checkout, setup-python, upload/
-# download-artifact, …) onto Node 24, even when the action's metadata
-# still requests Node 20. Silences the runner deprecation warnings.
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-
 jobs:
-  build:
-    name: Build sdist + wheel
+  release:
+    name: Build and publish
     runs-on: ubuntu-latest
+    environment:
+      name: release
+      url: https://pypi.org/project/htop-gpu/
+    permissions:
+      id-token: write   # Trusted Publishing OIDC
+      contents: read
     steps:
       - uses: actions/checkout@v5
 
@@ -43,35 +40,13 @@ jobs:
           python-version: "3.x"
 
       - name: Install build tooling
-        run: python -m pip install --upgrade build
+        run: python -m pip install --upgrade build twine
 
       - name: Build distributions
         run: python -m build
 
       - name: Verify metadata
-        run: |
-          python -m pip install --upgrade twine
-          python -m twine check dist/*
-
-      - uses: actions/upload-artifact@v5
-        with:
-          name: dist
-          path: dist/
-
-  publish:
-    name: Publish to PyPI
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: release
-      url: https://pypi.org/project/htop-gpu/
-    permissions:
-      id-token: write   # required for Trusted Publishing
-    steps:
-      - uses: actions/download-artifact@v5
-        with:
-          name: dist
-          path: dist/
+        run: python -m twine check dist/*
 
       - name: Publish via Trusted Publisher
         uses: pypa/gh-action-pypi-publish@release/v1

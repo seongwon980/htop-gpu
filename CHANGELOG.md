@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.4 — 2026-04-18
+
+CI: collapse build + publish into a single job — eliminates the
+`upload-artifact` / `download-artifact` steps that still pulled in
+Node 20. No user-visible changes.
+
 ## 0.1.3 — 2026-04-18
 
 CI: force `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` so the few actions
