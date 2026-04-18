@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "htop-gpu"
+version = "0.1.0"
+description = "Terminal dashboard for NVIDIA GPUs, system CPU/memory, and processes — clickable, with conda/docker/tmux info per process."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [
+    { name = "Seongwon Cho" },
+]
+keywords = [
+    "gpu",
+    "nvidia",
+    "monitor",
+    "htop",
+    "btop",
+    "nvtop",
+    "tui",
+    "terminal",
+    "cuda",
+    "nvidia-smi",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Monitoring",
+    "Topic :: System :: Hardware",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "psutil>=5.9",
+    # Optional fast NVML bindings; the tool transparently falls back to the
+    # nvidia-smi subprocess path if NVML can't be initialized.
+    "nvidia-ml-py>=11.5",
+]
+
+[project.scripts]
+htop-gpu = "htop_gpu.cli:main"
+hgpu     = "htop_gpu.cli:main"
+
+[project.urls]
+Homepage      = "https://github.com/seongwon980/htop-gpu"
+Repository    = "https://github.com/seongwon980/htop-gpu"
+Issues        = "https://github.com/seongwon980/htop-gpu/issues"
+Changelog     = "https://github.com/seongwon980/htop-gpu/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+include = ["htop_gpu*"]
