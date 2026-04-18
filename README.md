@@ -2,7 +2,7 @@
 
 # htop-gpu
 
-**GPU monitor that shows the conda env, docker container, and working directory of every process** — built for shared multi-user servers.
+**NVIDIA GPUs, system CPU/memory, and processes in one terminal dashboard** — each process annotated with its conda env, docker container, and working directory.
 
 [![PyPI](https://img.shields.io/pypi/v/htop-gpu.svg?style=flat-square&color=blue)](https://pypi.org/project/htop-gpu/)
 [![Python](https://img.shields.io/pypi/pyversions/htop-gpu.svg?style=flat-square)](https://pypi.org/project/htop-gpu/)
