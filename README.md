@@ -76,17 +76,6 @@ tried (nvtop, gpustat, nvitop) showed that, so this exists. The
 mouse-driven mode switching and process-kill shortcut grew out of using
 it daily.
 
-## Compared to other tools
-
-|                                          | nvidia-smi | gpustat | nvtop | nvitop | htop-gpu |
-|------------------------------------------|:----------:|:-------:|:-----:|:------:|:--------:|
-| Per-process GPU memory                   |     ✓      |    ✓    |   ✓   |   ✓    |    ✓     |
-| System CPU & memory in the same view     |            |         |       |        |    ✓     |
-| Conda env / docker container / tmux tag  |            |         |       |        |    ✓     |
-| Click panels to swap process view        |            |         |       |        |    ✓     |
-| Process kill (with sudo fallback)        |            |         |       |   ✓    |    ✓     |
-| Pure Python, single `pip install`        |            |    ✓    |       |   ✓    |    ✓     |
-
 ## Credits
 
 UI takes inspiration from [htop](https://htop.dev),
