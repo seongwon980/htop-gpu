@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import os
 import re
 import shutil
@@ -131,7 +132,8 @@ class ProcessInfo:
     user: str = ""
     cmd: str = ""
     cmd_short: str = ""
-    cwd: str = ""
+    cwd: str = ""             # default-display cwd (host path for containers)
+    cwd_container: str = ""   # container-internal cwd (only set inside containers)
     elapsed: str = ""
     started: str = ""
     conda_env: str = ""
@@ -186,6 +188,8 @@ class UIState:
     selected_pid: int | None = None # process selected via click/arrows
     kill_prompt: str | None = None  # transient status text shown in title line
     focus_procs: bool = False       # when True, hide cpu/mem/gpus and fill with procs
+    container_cwd: bool = False     # when True, show container-internal cwd
+                                    # for containerised procs (default: host path)
 
 
 @dataclass
@@ -752,11 +756,18 @@ def _detect_container(pid: int) -> str | None:
 
 
 def _get_container_info(container_id: str) -> dict:
-    """Get container name, image, and overlay MergedDir via docker inspect."""
+    """Fetch container metadata via a single `docker inspect` call.
+    Populates name, image, overlay MergedDir, WorkingDir, and the list of
+    bind-mounts (source→destination), which is what lets us translate a
+    container-internal cwd back to its host path."""
     if container_id in _container_cache:
         return _container_cache[container_id]
 
-    info: dict = {"name": container_id, "image": "", "merged_dir": "", "working_dir": ""}
+    info: dict = {
+        "name": container_id, "image": "",
+        "merged_dir": "", "working_dir": "",
+        "mounts": [],  # list of (host_src, container_dst), longest-dst first
+    }
 
     if not _docker_available():
         _container_cache[container_id] = info
@@ -764,21 +775,26 @@ def _get_container_info(container_id: str) -> dict:
 
     try:
         result = subprocess.run(
-            ["docker", "inspect", "--format",
-             "{{.Name}}|{{.GraphDriver.Data.MergedDir}}|{{.Config.Image}}|{{.Config.WorkingDir}}",
-             container_id],
+            ["docker", "inspect", container_id],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode == 0:
-            parts = result.stdout.strip().split("|")
-            if len(parts) >= 1 and parts[0]:
-                info["name"] = parts[0].lstrip("/")
-            if len(parts) >= 2:
-                info["merged_dir"] = parts[1]
-            if len(parts) >= 3:
-                info["image"] = parts[2]
-            if len(parts) >= 4:
-                info["working_dir"] = parts[3]
+            data = json.loads(result.stdout)[0]
+            info["name"] = (data.get("Name") or container_id).lstrip("/")
+            info["merged_dir"] = (
+                data.get("GraphDriver", {}).get("Data", {}).get("MergedDir", "")
+            )
+            info["image"] = data.get("Config", {}).get("Image", "")
+            info["working_dir"] = data.get("Config", {}).get("WorkingDir", "")
+            mounts: list[tuple[str, str]] = []
+            for m in data.get("Mounts", []):
+                src = m.get("Source") or ""
+                dst = m.get("Destination") or ""
+                if src and dst:
+                    mounts.append((src, dst))
+            # Longest container-path first so /app/subdir wins over /app.
+            mounts.sort(key=lambda x: -len(x[1]))
+            info["mounts"] = mounts
     except Exception:
         pass
 
@@ -786,37 +802,61 @@ def _get_container_info(container_id: str) -> dict:
     return info
 
 
-def _container_cwd(pid: int, container_id: str, cinfo: dict) -> str:
-    """Get the container-internal cwd for a process, trying multiple methods."""
-    # Method 1: readlink from host — may get overlay path or may fail (permission)
+def _container_cwd(pid: int, container_id: str, cinfo: dict) -> tuple[str, str]:
+    """Return (host_cwd, container_internal_cwd) for a containerised
+    process. host_cwd is the bind-mount-resolved path on the host (so the
+    user can `cd` to it directly); empty when the cwd lives only inside
+    the container's own overlay. container_internal_cwd is the path as
+    the process itself sees it (e.g. /app). Either field can be empty."""
+    internal = ""
     try:
-        host_cwd = os.readlink(f"/proc/{pid}/cwd")
-        merged = cinfo.get("merged_dir", "")
-        if merged and host_cwd.startswith(merged):
-            return host_cwd[len(merged):] or "/"
-        return host_cwd
+        internal = os.readlink(f"/proc/{pid}/cwd")
     except PermissionError:
-        pass
+        # Container cwd readlinks often fail for non-root (different user
+        # namespace). Fall back to nsenter which works under root.
+        try:
+            result = subprocess.run(
+                ["nsenter", "-m", "-t", str(pid),
+                 "readlink", f"/proc/{pid}/cwd"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0:
+                internal = result.stdout.strip()
+        except Exception:
+            pass
     except Exception:
-        return "(unknown)"
+        return ("", "")
 
-    # Method 2: nsenter into mount namespace (works when running as root)
-    try:
-        result = subprocess.run(
-            ["nsenter", "-m", "-t", str(pid), "readlink", f"/proc/{pid}/cwd"],
-            capture_output=True, text=True, timeout=3,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except Exception:
-        pass
+    if not internal:
+        # Couldn't readlink the live cwd (most often: the proc is running
+        # as a different UID — typical for `docker run` defaults to root).
+        # Fall back to the container image's WORKDIR; processes overwhelmingly
+        # stay there for their lifetime.
+        internal = cinfo.get("working_dir", "")
+        if not internal:
+            return ("", "")
 
-    # Method 3: fallback to container's configured WorkingDir
-    wd = cinfo.get("working_dir", "")
-    if wd:
-        return wd
+    # If readlink returned the host-side overlay path (e.g.
+    # /var/lib/docker/overlay2/<id>/merged/app), strip the MergedDir
+    # prefix to recover the container-internal path first. We can't
+    # expose the overlay path to the user — it's a private implementation
+    # detail of the container runtime.
+    merged = cinfo.get("merged_dir", "")
+    if merged and internal.startswith(merged):
+        internal = internal[len(merged):] or "/"
 
-    return "(container — cwd not accessible)"
+    # Translate internal cwd → host path via the container's mount list.
+    # Longest-destination-prefix wins (already sorted in _get_container_info).
+    host = ""
+    for src, dst in cinfo.get("mounts", []):
+        if internal == dst:
+            host = src
+            break
+        if internal.startswith(dst.rstrip("/") + "/"):
+            host = src.rstrip("/") + internal[len(dst.rstrip("/")):]
+            break
+
+    return (host, internal)
 
 
 # ── Process detail gathering ─────────────────────────────────────────────────
@@ -861,7 +901,7 @@ def _get_proc_static(pid: int, psp: psutil.Process | None) -> dict:
         return cached
 
     info: dict = {
-        "cmd": "", "cmd_short": "", "cwd": "",
+        "cmd": "", "cmd_short": "", "cwd": "", "cwd_container": "",
         "conda_env": "", "venv": "",
         "container_id": None, "container_name": "", "container_image": "",
         "parent_info": "", "create_time": 0.0, "user": "",
@@ -906,7 +946,11 @@ def _get_proc_static(pid: int, psp: psutil.Process | None) -> dict:
         info["container_id"] = container_id
         info["container_name"] = cinfo.get("name", container_id)
         info["container_image"] = cinfo.get("image", "")
-        info["cwd"] = _container_cwd(pid, container_id, cinfo)
+        host_cwd, internal_cwd = _container_cwd(pid, container_id, cinfo)
+        # Default display = host path so the user can `cd` into it. The
+        # container-internal path stays available for the `h` toggle.
+        info["cwd"] = host_cwd
+        info["cwd_container"] = internal_cwd
 
     # conda / venv
     try:
@@ -945,6 +989,7 @@ def get_process_info(pid: int, gpu_index: int, gpu_mem: int) -> ProcessInfo:
     p.cmd = static["cmd"]
     p.cmd_short = static["cmd_short"]
     p.cwd = static["cwd"]
+    p.cwd_container = static.get("cwd_container", "")
     p.conda_env = static["conda_env"]
     p.venv = static["venv"]
     p.container_name = static["container_name"]
@@ -1668,7 +1713,13 @@ def render_proc_box(all_procs: list[ProcessInfo], W: int,
         # the command on the same row to keep each proc compact, instead of
         # burning a whole second row on it.
         meta_parts_colored: list[str] = []
-        cwd_disp = proc.cwd.replace(f"/home/{proc.user}", "~") if proc.cwd else ""
+        # Container procs show host path by default, container-internal path
+        # when state.container_cwd is toggled on (via the `h` keybind).
+        cwd_raw = (
+            proc.cwd_container if (state and state.container_cwd and proc.cwd_container)
+            else proc.cwd
+        )
+        cwd_disp = cwd_raw.replace(f"/home/{proc.user}", "~") if cwd_raw else ""
         if cwd_disp:
             meta_parts_colored.append(c(C.CYAN, cwd_disp))
         if proc.container_name:
@@ -1801,6 +1852,8 @@ def _hint_variants(state: UIState) -> list[str]:
 
     long_long  = "short cmd" if state.long else "long cmd"
     long_short = "short" if state.long else "long"
+    cwd_long   = "host cwd"  if state.container_cwd else "container cwd"
+    cwd_short  = "host cwd"  if state.container_cwd else "ctr cwd"
 
     # Mode-switch chips are only useful from the default gpu view (in
     # cpu/mem the user is already in one of the modes; in focus they're
@@ -1827,9 +1880,11 @@ def _hint_variants(state: UIState) -> list[str]:
         ]
     parts_long  += [f"{_kbd('↑↓')} {c(C.DIM, 'select')}",
                     f"{_kbd('l')} {c(C.DIM, long_long)}",
+                    f"{_kbd('h')} {c(C.DIM, cwd_long)}",
                     f"{_kbd('q')} {c(C.DIM, 'quit')}"]
     parts_short += [f"{_kbd('↑↓')} {c(C.DIM, 'sel')}",
                     f"{_kbd('l')} {c(C.DIM, long_short)}",
+                    f"{_kbd('h')} {c(C.DIM, cwd_short)}",
                     f"{_kbd('q')} {c(C.DIM, 'quit')}"]
     parts_min   += [f"{_kbd('q')} {c(C.DIM, 'quit')}"]
 
@@ -2377,6 +2432,8 @@ def run_watch(interval: float, long: bool = False):
                         break
                     if key in ("l", "\x0f"):
                         state.long = not state.long
+                    elif key == "h":
+                        state.container_cwd = not state.container_cwd
                     elif key == "a":
                         state.filter_gpu = None
                     elif key.isdigit() and len(key) == 1:
@@ -2404,12 +2461,14 @@ def run_watch(interval: float, long: bool = False):
                     elif key in ("\x1b", "LEFT"):
                         # Esc / ← — universal "back": clear every transient
                         # mode (selection, focus, cpu/mem mode, GPU filter,
-                        # long-cmd) and return to the default GPU view.
+                        # long-cmd, container-cwd) and return to the default
+                        # GPU view.
                         state.selected_pid = None
                         state.focus_procs = False
                         state.mode = "gpu"
                         state.filter_gpu = None
                         state.long = False
+                        state.container_cwd = False
             if quit_now:
                 break
     finally:

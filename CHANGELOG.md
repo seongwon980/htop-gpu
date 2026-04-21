@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.9 — 2026-04-22
+
+For containerised GPU processes, the cwd column now shows the
+**host-side** path (resolved through the container's bind-mounts) by
+default — so you can `cd` straight to it. The container-internal path
+(e.g. `/app`) is one keystroke away: press `h` in watch mode to flip.
+Previously the column showed only the container-internal path, which
+isn't useful without first running `docker inspect` to find the mount.
+
+`docker inspect` is called once per container (cached for the
+container's lifetime), and falls back to the image's `WORKDIR` when
+the live cwd readlink fails (typical when the proc runs as a
+different UID than htop-gpu). When the cwd has no host mapping at
+all, the column is left blank instead of showing the unrelatable
+overlay path.
+
 ## 0.1.8 — 2026-04-18
 
 Fix: restore the `hgpu` short-alias command. 0.1.7 unintentionally
