@@ -2294,7 +2294,12 @@ def _kill_selected(state: UIState, fd: int, old_settings) -> None:
     # Suspend TUI (restore terminal) so sudo can prompt for password normally.
     import termios
     import tty
-    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    # TCSAFLUSH (vs TCSADRAIN) and an explicit tcflush drop any stdin
+    # bytes still queued after the `k` keypress — without this, a
+    # trailing Enter (or held-key repeat) gets fed into sudo as an
+    # empty password and the prompt disappears before the user can type.
+    termios.tcsetattr(fd, termios.TCSAFLUSH, old_settings)
+    termios.tcflush(fd, termios.TCIFLUSH)
     sys.stdout.write("\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[2J\x1b[H")
     sys.stdout.flush()
     print(f"sudo kill {pid}  (enter your password if prompted)")
@@ -2302,7 +2307,13 @@ def _kill_selected(state: UIState, fd: int, old_settings) -> None:
         subprocess.run(["sudo", "kill", str(pid)], check=False)
     except Exception as e:
         print(f"kill failed: {e}")
-    time.sleep(0.3)
+    # Block until the user acknowledges, so any sudo output (success,
+    # "incorrect password", etc.) stays readable instead of being wiped
+    # by the next render tick.
+    try:
+        input("\n[press Enter to return]")
+    except (EOFError, KeyboardInterrupt):
+        pass
     # Re-enter TUI
     tty.setcbreak(fd)
     sys.stdout.write("\x1b[?25l\x1b[?1000h\x1b[?1006h")

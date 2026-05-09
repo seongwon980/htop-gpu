@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.10 — 2026-05-09
+
+Fix: when the kill (`k`) keypress lands on a process the current user
+can't signal directly, htop-gpu suspends the TUI and runs `sudo kill`.
+The password prompt was vanishing instantly — any byte still queued in
+stdin after the `k` press (a trailing Enter, a held-key repeat) was
+being read as the password by sudo, which then exited fast and let the
+next render tick wipe the prompt off-screen.
+
+The terminal restore now uses `TCSAFLUSH` plus an explicit
+`tcflush(TCIFLUSH)` so sudo starts with empty stdin, and the post-sudo
+flow waits on `[press Enter to return]` instead of a 0.3s sleep — so
+sudo output (success message, `Sorry, try again.`, etc.) stays
+readable until the user dismisses it.
+
 ## 0.1.9 — 2026-04-22
 
 For containerised GPU processes, the cwd column now shows the
